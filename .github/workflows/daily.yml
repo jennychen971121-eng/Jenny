@@ -1,18 +1,13 @@
 name: daily-youtube-leads
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 1 * * *"
-  push:
-    paths:
-      - ".github/workflows/daily.yml"
-      - "run_daily_leads.py"
-      - "requirements.txt"
-      - "keyword_pool.txt"
+    # 每天北京时间 10:00（UTC 02:00）
+    - cron: "0 2 * * *"
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   run:
@@ -26,28 +21,27 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Inspect repo files (debug)
-        run: |
-          pwd
-          ls -la
-          echo "=== requirements.txt ==="
-          sed -n '1,200p' requirements.txt
-
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --requirement requirements.txt
+          pip install -r requirements.txt
 
-      - name: Run script
+      - name: Run
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
-          mkdir -p output
           python run_daily_leads.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-leads
-          path: output/*.csv
-          if-no-files-found: error
+          path: out/*.csv
+
+      - name: Commit updated done ids
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add done_channel_ids.txt || true
+          git commit -m "update done ids" || echo "No changes"
+          git push
