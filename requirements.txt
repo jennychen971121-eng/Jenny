@@ -1,1 +1,2 @@
-requirements.txt
+google-api-python-client==2.126.0
+requests==2.32.3
