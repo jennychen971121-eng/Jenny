@@ -2,46 +2,78 @@ name: daily-youtube-leads
 
 on:
   schedule:
-    # 每天北京时间 10:00（UTC 02:00）
-    - cron: "0 2 * * *"
+    # GitHub cron 使用 UTC。01:00 UTC = 北京时间 09:00
+    - cron: "0 1 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: daily-youtube-leads
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Setup Python
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Restore done_channel_ids.txt from data branch (if exists)
+        shell: bash
+        run: |
+          set -e
+          git fetch origin data || true
+
+          if git show-ref --verify --quiet refs/remotes/origin/data; then
+            # 把 data 分支的 done 文件取出来覆盖到当前工作区（main）
+            git show origin/data:done_channel_ids.txt > done_channel_ids.txt || true
+            echo "Restored done_channel_ids.txt from data branch."
+          else
+            echo "Data branch does not exist yet. Will create it after first run."
+            touch done_channel_ids.txt
+          fi
+
+          # 如果文件为空也没关系，脚本会追加
+          ls -la done_channel_ids.txt || true
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install google-api-python-client requests
 
-      - name: Run
+      - name: Run lead generator
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           python run_daily_leads.py
 
-      - name: Upload artifact
+      - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-leads
           path: out/*.csv
+          if-no-files-found: warn
+          retention-days: 30
 
-      - name: Commit updated done ids
+      - name: Push done_channel_ids.txt to data branch
+        shell: bash
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add done_channel_ids.txt || true
-          git commit -m "update done ids" || echo "No changes"
-          git push
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin data || true
+          if git show-ref --verify --quiet refs/remotes/origin/data; then
+            git checkout data
+            git pull origin
