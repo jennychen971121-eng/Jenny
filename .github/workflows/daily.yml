@@ -27,20 +27,21 @@ jobs:
       - name: Restore done_channel_ids.txt from data branch (if exists)
         shell: bash
         run: |
-          set -e
-          git fetch origin data || true
+          set -euo pipefail
 
-          if git show-ref --verify --quiet refs/remotes/origin/data; then
-            # 把 data 分支的 done 文件取出来覆盖到当前工作区（main）
+          # 如果远端存在 data 分支，就把其中的 done_channel_ids.txt 拉出来
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            echo "Remote data branch exists. Restoring done_channel_ids.txt ..."
+            git fetch origin data
+            # 若文件不存在则不报错
             git show origin/data:done_channel_ids.txt > done_channel_ids.txt || true
-            echo "Restored done_channel_ids.txt from data branch."
           else
-            echo "Data branch does not exist yet. Will create it after first run."
-            touch done_channel_ids.txt
+            echo "Remote data branch does not exist yet. Creating fresh done_channel_ids.txt"
+            : > done_channel_ids.txt
           fi
 
-          # 如果文件为空也没关系，脚本会追加
-          ls -la done_channel_ids.txt || true
+          echo "done_channel_ids.txt size:"
+          wc -l done_channel_ids.txt || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -48,32 +49,71 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
+          # 你仓库有 requirements.txt 也没问题；为了稳，这里直接装必要依赖
           pip install google-api-python-client requests
 
       - name: Run lead generator
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        shell: bash
         run: |
+          set -euo pipefail
           python run_daily_leads.py
+          echo "List output files:"
+          ls -la || true
+          ls -la out || true
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
           name: youtube-leads
           path: out/*.csv
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
-      - name: Push done_channel_ids.txt to data branch
+      - name: Push done_channel_ids.txt to data branch (create/update)
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin data || true
-          if git show-ref --verify --quiet refs/remotes/origin/data; then
-            git checkout data
-            git pull origin
+          test -f done_channel_ids.txt || : > done_channel_ids.txt
+
+          # 用临时目录提交到 data 分支，避免在主工作区来回 checkout 导致问题
+          workdir="$(mktemp -d)"
+          cp done_channel_ids.txt "${workdir}/done_channel_ids.txt"
+          cd "${workdir}"
+
+          git init
+          git add done_channel_ids.txt
+
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add origin "${remote}"
+
+          # 如果远端已有 data 分支：基于它更新；否则创建新分支
+          if git ls-remote --exit-code --heads "${remote}" data >/dev/null 2>&1; then
+            echo "Updating existing data branch..."
+            git fetch origin data
+            git checkout -b data FETCH_HEAD
+          else
+            echo "Creating new data branch..."
+            git checkout -b data
+          fi
+
+          git add done_channel_ids.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to done_channel_ids.txt"
+            exit 0
+          fi
+
+          git commit -m "Update done ids $(date -u +'%Y-%m-%d')"
+          git push -u origin data
