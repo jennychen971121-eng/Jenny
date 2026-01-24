@@ -35,3 +35,128 @@ jobs:
           else
             echo "Remote data branch does not exist yet. Creating fresh done_channel_ids.txt"
             : > done_channel_ids.txt
+          fi
+          echo "done_channel_ids.txt lines:"
+          wc -l done_channel_ids.txt || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install google-api-python-client requests
+          fi
+
+      - name: Run lead generator (capture log)
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python run_daily_leads.py 2>&1 | tee run.log
+
+      - name: Debug - show workspace files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PWD: $(pwd)"
+          echo "Top-level files:"
+          ls -la
+          echo "out/ contents:"
+          ls -la out || true
+          echo "Find CSV files:"
+          find . -maxdepth 3 -type f -name "*.csv" -print || true
+          echo "---- run.log (last 200 lines) ----"
+          tail -n 200 run.log || true
+
+      - name: Ensure at least one CSV exists for upload (avoid upload failure)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          shopt -s nullglob
+          files=(out/*.csv)
+          shopt -u nullglob
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No out/*.csv produced. Creating a placeholder CSV so workflow won't fail."
+            fname="out/leads_${GITHUB_RUN_ID}.csv"
+            echo "channel_id,channel_title,channel_url,email,source_keyword,notes" > "${fname}"
+            echo "Created: ${fname}"
+          else
+            echo "CSV(s) found:"
+            printf '%s\n' "${files[@]}"
+          fi
+
+      - name: Upload leads artifact (CSV)
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-leads
+          path: out/*.csv
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload debug log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-leads-log
+          path: run.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Push done_channel_ids.txt to data branch (create/update)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # 关键：设置为 global，确保临时仓库 commit 不会再报 Author identity unknown
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          test -f done_channel_ids.txt || : > done_channel_ids.txt
+
+          workdir="$(mktemp -d)"
+          cp done_channel_ids.txt "${workdir}/done_channel_ids.txt"
+          cd "${workdir}"
+
+          git init
+
+          # 双保险：在临时仓库再设置一次本地身份
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add done_channel_ids.txt
+
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add origin "${remote}"
+
+          if git ls-remote --exit-code --heads "${remote}" data >/dev/null 2>&1; then
+            echo "Updating existing data branch..."
+            git fetch origin data
+            git checkout -b data FETCH_HEAD
+          else
+            echo "Creating new data branch..."
+            git checkout -b data
+          fi
+
+          git add done_channel_ids.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to done_channel_ids.txt"
+            exit 0
+          fi
+
+          git commit -m "Update done ids $(date -u +'%Y-%m-%d')"
+          git push -u origin data
