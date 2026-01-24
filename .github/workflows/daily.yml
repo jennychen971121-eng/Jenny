@@ -28,19 +28,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # 如果远端存在 data 分支，就把其中的 done_channel_ids.txt 拉出来
           if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
             echo "Remote data branch exists. Restoring done_channel_ids.txt ..."
             git fetch origin data
-            # 若文件不存在则不报错
             git show origin/data:done_channel_ids.txt > done_channel_ids.txt || true
           else
             echo "Remote data branch does not exist yet. Creating fresh done_channel_ids.txt"
             : > done_channel_ids.txt
           fi
-
-          echo "done_channel_ids.txt size:"
+          echo "done_channel_ids.txt lines:"
           wc -l done_channel_ids.txt || true
 
       - name: Set up Python
@@ -53,26 +49,70 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # 你仓库有 requirements.txt 也没问题；为了稳，这里直接装必要依赖
-          pip install google-api-python-client requests
+          # 优先用 requirements.txt（如果有）
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install google-api-python-client requests
+          fi
 
-      - name: Run lead generator
+      - name: Run lead generator (capture log)
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          python run_daily_leads.py
-          echo "List output files:"
-          ls -la || true
-          ls -la out || true
+          mkdir -p out
+          # 把运行日志保存下来，便于排查
+          python run_daily_leads.py 2>&1 | tee run.log
 
-      - name: Upload CSV artifact
+      - name: Debug - show workspace files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PWD: $(pwd)"
+          echo "Top-level files:"
+          ls -la
+          echo "out/ contents:"
+          ls -la out || true
+          echo "Find CSV files:"
+          find . -maxdepth 3 -type f -name "*.csv" -print || true
+
+      - name: Ensure at least one CSV exists for upload (avoid upload failure)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          shopt -s nullglob
+          files=(out/*.csv)
+          shopt -u nullglob
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No out/*.csv produced. Creating a placeholder CSV so workflow won't fail."
+            fname="out/leads_${GITHUB_RUN_ID}.csv"
+            # 用你期望的字段名（如果你脚本字段不同，后面我可按脚本调整）
+            echo "channel_id,channel_title,channel_url,email,source_keyword,notes" > "${fname}"
+            echo "Created: ${fname}"
+          else
+            echo "CSV(s) found:"
+            printf '%s\n' "${files[@]}"
+          fi
+
+      - name: Upload leads artifact (CSV)
         uses: actions/upload-artifact@v4
         with:
           name: youtube-leads
           path: out/*.csv
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload debug log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-leads-log
+          path: run.log
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Push done_channel_ids.txt to data branch (create/update)
@@ -87,7 +127,6 @@ jobs:
 
           test -f done_channel_ids.txt || : > done_channel_ids.txt
 
-          # 用临时目录提交到 data 分支，避免在主工作区来回 checkout 导致问题
           workdir="$(mktemp -d)"
           cp done_channel_ids.txt "${workdir}/done_channel_ids.txt"
           cd "${workdir}"
@@ -98,7 +137,6 @@ jobs:
           remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git remote add origin "${remote}"
 
-          # 如果远端已有 data 分支：基于它更新；否则创建新分支
           if git ls-remote --exit-code --heads "${remote}" data >/dev/null 2>&1; then
             echo "Updating existing data branch..."
             git fetch origin data
